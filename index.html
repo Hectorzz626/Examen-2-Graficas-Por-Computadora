@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Examen Hector Vela</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a1a2e;
+            color: #f0f0f0;
+        }
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1; 
+        }
+
+        #label-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; 
+            z-index: 2;
+            overflow: hidden;
+        }
+        /*--------------- ESTILO PARA CADA NUMERO EN LA ESFERA ---------*/
+        .label {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: #fff;
+            padding: 1px 4px;
+            border-radius: 4px;
+            font-size: 10px;
+            transform: translate(-50%, -50%); 
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(20, 20, 30, 0.7);
+            backdrop-filter: blur(10px);
+            padding: 10px 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            z-index: 100;
+        }
+        .control-group { display: flex; align-items: center; gap: 10px; }
+        .control-group label { font-weight: 500; font-size: 14px; }
+        input[type="file"] { display: none; }
+        .file-label {
+            background-color: #3d3d3d;
+            padding: 8px 15px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .file-label:hover { background-color: #555; }
+        input[type="color"] { width: 32px; height: 32px; border: none; cursor: pointer; background: none; border-radius: 50%; padding: 0; }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; border-radius: 50%; }
+        input[type="color"]::-webkit-color-swatch { border: 2px solid #fff; border-radius: 50%; }
+        input[type="range"] { width: 120px; }
+        #status {
+            position: absolute;
+            bottom: 15px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.7);
+            font-style: italic;
+            font-size: 16px;
+            z-index: 100;
+        }
+        .highlight { font-weight: bold; color: #4ec9b0; font-size: 1.25em; font-style: normal; margin: 0 4px; }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div class="control-group">
+            <label for="objFile" class="file-label" title="Cargar archivo .OBJ">
+                <span>📁</span>
+                <span>Selecc. Archivo</span>
+            </label>
+            <input type="file" id="objFile" accept=".obj">
+        </div>
+        <div class="control-group">
+            <label for="objectColor" title="Color del objeto">🎨</label>
+            <input type="color" id="objectColor" value="#33CC50">
+        </div>
+        <div class="control-group">
+            <label for="spineColor" title="Color de las espinas">🖌️</label>
+            <input type="color" id="spineColor" value="#FFFF00">
+        </div>
+        <div class="control-group">
+            <label for="spineLength" title="Longitud de las espinas">📏</label>
+            <input type="range" id="spineLength" min="0.01" max="0.5" step="0.01" value="0.1">
+        </div>
+    </div>
+    <p id="status">Selecciona un archivo .OBJ para empezar</p>
+    <canvas id="glcanvas"></canvas>
+    <div id="label-container"></div> <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js"></script>
+    <script src="obj-parser.js"></script>
+
+    <script>
+        const canvas = document.getElementById('glcanvas');
+        const labelContainer = document.getElementById('label-container');
+        const gl = canvas.getContext('webgl', { antialias: true });
+        if (!gl) { alert("WebGL no disponible."); }
+
+        // ------------------- SHADERS --------------------
+        const vsObjectSource = `attribute vec4 aVertexPosition; attribute vec3 aVertexNormal; uniform mat4 uMvpMatrix; uniform mat4 uNormalMatrix; varying highp vec3 vLighting; void main(void) { gl_Position = uMvpMatrix * aVertexPosition; highp vec3 ambientLight = vec3(0.3, 0.3, 0.3); highp vec3 directionalLightColor = vec3(0.8, 0.8, 0.8); highp vec3 directionalVector = normalize(vec3(0.85, 0.8, 0.75)); highp vec4 transformedNormal = uNormalMatrix * vec4(aVertexNormal, 1.0); highp float directional = max(dot(transformedNormal.xyz, directionalVector), 0.0); vLighting = ambientLight + (directionalLightColor * directional); }`;
+        const fsObjectSource = `precision mediump float; varying highp vec3 vLighting; uniform vec3 uObjectColor; void main(void) { gl_FragColor = vec4(uObjectColor * vLighting, 1.0); }`;
+        const vsLineSource = `attribute vec4 aVertexPosition; uniform mat4 uMvpMatrix; void main(void) { gl_Position = uMvpMatrix * aVertexPosition; }`;
+        const fsLineSource = `precision mediump float; uniform vec3 uSpineColor; void main(void) { gl_FragColor = vec4(uSpineColor, 1.0); }`;
+
+        function initShaderProgram(vs, fs) { const p = gl.createProgram(); gl.attachShader(p, loadShader(gl.VERTEX_SHADER, vs)); gl.attachShader(p, loadShader(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); return p; }
+        function loadShader(type, source) { const s = gl.createShader(type); gl.shaderSource(s, source); gl.compileShader(s); return s; }
+
+        const objectProgram = initShaderProgram(vsObjectSource, fsObjectSource);
+        const lineProgram = initShaderProgram(vsLineSource, fsLineSource);
+
+        const objectProgramInfo = { program: objectProgram, attribs: { pos: gl.getAttribLocation(objectProgram, 'aVertexPosition'), norm: gl.getAttribLocation(objectProgram, 'aVertexNormal') }, uniforms: { mvp: gl.getUniformLocation(objectProgram, 'uMvpMatrix'), normMatrix: gl.getUniformLocation(objectProgram, 'uNormalMatrix'), color: gl.getUniformLocation(objectProgram, 'uObjectColor') }, };
+        const lineProgramInfo = { program: lineProgram, attribs: { pos: gl.getAttribLocation(lineProgram, 'aVertexPosition') }, uniforms: { mvp: gl.getUniformLocation(lineProgram, 'uMvpMatrix'), color: gl.getUniformLocation(lineProgram, 'uSpineColor') }, };
+        
+        // ------------------------- ESTADO GLOBAL ---------------------------
+        let objectBuffers = null;
+        let lineBuffers = null;
+        let objDataCache = null;
+        let triangleLabels = [];
+        let cameraAngleX = 0, cameraAngleY = 0;
+        let animationFrameId = null;
+
+        // ------------------- EVENT LISTENERS ---------------------------
+        document.getElementById('objFile').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            document.getElementById('status').textContent = 'Cargando y procesando...';
+            const reader = new FileReader();
+            reader.onload = (e) => processOBJData(e.target.result);
+            reader.readAsText(file);
+        });
+
+        document.getElementById('spineLength').addEventListener('input', (e) => {
+            if (objDataCache) {
+                generateLineBuffers(objDataCache, parseFloat(e.target.value));
+            }
+        });
+
+        function processOBJData(objText) {
+            objDataCache = parseOBJ(objText);
+            
+            const posBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, objDataCache.positions, gl.STATIC_DRAW);
+            const normBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, objDataCache.normals, gl.STATIC_DRAW);
+            objectBuffers = { position: posBuffer, normal: normBuffer, vertexCount: objDataCache.positions.length / 3 };
+
+            generateLineBuffers(objDataCache, parseFloat(document.getElementById('spineLength').value));
+            
+            // ------------------- GENERA ETIQUETAS PARA LOS NUMEROS ---------------
+            labelContainer.innerHTML = '';
+            triangleLabels = [];
+            objDataCache.triangles.forEach((tri, index) => {
+                const midX = (tri.vertices[0][0] + tri.vertices[1][0] + tri.vertices[2][0]) / 3;
+                const midY = (tri.vertices[0][1] + tri.vertices[1][1] + tri.vertices[2][1]) / 3;
+                const midZ = (tri.vertices[0][2] + tri.vertices[1][2] + tri.vertices[2][2]) / 3;
+
+                const label = document.createElement('div');
+                label.className = 'label';
+                label.textContent = index + 1;
+                labelContainer.appendChild(label);
+
+                triangleLabels.push({
+                    midpoint: [midX, midY, midZ],
+                    element: label
+                });
+            });
+
+            document.getElementById('status').innerHTML = `Modelo cargado con <span class="highlight">${objDataCache.triangles.length.toLocaleString()}</span> triángulos. Arrastra para rotar.`;
+            if (!animationFrameId) render();
+        }
+
+        // ---------------- CALCULA PUNTOS MEDIOS!!!!!!!!! -------------------
+
+        function generateLineBuffers(objData, spineLength) {
+            const lines = [];
+            for (const tri of objData.triangles) {
+                const midpoint = [(tri.vertices[0][0] + tri.vertices[1][0] + tri.vertices[2][0]) / 3, (tri.vertices[0][1] + tri.vertices[1][1] + tri.vertices[2][1]) / 3, (tri.vertices[0][2] + tri.vertices[1][2] + tri.vertices[2][2]) / 3];
+                const normal = vec3.normalize([], [(tri.normals[0][0] + tri.normals[1][0] + tri.normals[2][0]) / 3, (tri.normals[0][1] + tri.normals[1][1] + tri.normals[2][1]) / 3, (tri.normals[0][2] + tri.normals[1][2] + tri.normals[2][2]) / 3]);
+                const endpoint = vec3.scaleAndAdd([], midpoint, normal, spineLength);
+                lines.push(...midpoint, ...endpoint);
+            }
+            const linePosBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.STATIC_DRAW);
+            lineBuffers = { position: linePosBuffer, vertexCount: lines.length / 3 };
+        }
+
+        function hexToRgb(hex) {
+            let r = 0, g = 0, b = 0; if (hex.length == 7) { r = parseInt(hex[1] + hex[2], 16); g = parseInt(hex[3] + hex[4], 16); b = parseInt(hex[5] + hex[6], 16); } return [r / 255, g / 255, b / 255];
+        }
+
+        function render() {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+            gl.clearColor(0.1, 0.15, 0.2, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            gl.enable(gl.DEPTH_TEST);
+            
+            const projectionMatrix = mat4.create();
+            mat4.perspective(projectionMatrix, 45 * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
+            const viewMatrix = mat4.create();
+            mat4.translate(viewMatrix, viewMatrix, [0.0, 0.0, -5.0]);
+            mat4.rotate(viewMatrix, viewMatrix, cameraAngleY, [1, 0, 0]);
+            mat4.rotate(viewMatrix, viewMatrix, cameraAngleX, [0, 1, 0]);
+            const mvpMatrix = mat4.create();
+            mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
+
+            if (objectBuffers) {
+                gl.useProgram(objectProgramInfo.program);
+                gl.uniformMatrix4fv(objectProgramInfo.uniforms.mvp, false, mvpMatrix);
+                const normalMatrix = mat4.create(); mat4.invert(normalMatrix, viewMatrix); mat4.transpose(normalMatrix, normalMatrix);
+                gl.uniformMatrix4fv(objectProgramInfo.uniforms.normMatrix, false, normalMatrix);
+                const objectColor = hexToRgb(document.getElementById('objectColor').value);
+                gl.uniform3fv(objectProgramInfo.uniforms.color, objectColor);
+                gl.bindBuffer(gl.ARRAY_BUFFER, objectBuffers.position);
+                gl.vertexAttribPointer(objectProgramInfo.attribs.pos, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(objectProgramInfo.attribs.pos);
+                gl.bindBuffer(gl.ARRAY_BUFFER, objectBuffers.normal);
+                gl.vertexAttribPointer(objectProgramInfo.attribs.norm, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(objectProgramInfo.attribs.norm);
+                gl.drawArrays(gl.TRIANGLES, 0, objectBuffers.vertexCount);
+            }
+
+            if (lineBuffers) {
+                gl.useProgram(lineProgramInfo.program);
+                gl.uniformMatrix4fv(lineProgramInfo.uniforms.mvp, false, mvpMatrix);
+                const spineColor = hexToRgb(document.getElementById('spineColor').value);
+                gl.uniform3fv(lineProgramInfo.uniforms.color, spineColor);
+                gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffers.position);
+                gl.vertexAttribPointer(lineProgramInfo.attribs.pos, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(lineProgramInfo.attribs.pos);
+                gl.drawArrays(gl.LINES, 0, lineBuffers.vertexCount);
+            }
+            
+            // ---------------- ACTUALIZA POSICION DE LOS NUMEROS -------------
+            triangleLabels.forEach(label => {
+                const worldCoords = vec4.fromValues(label.midpoint[0], label.midpoint[1], label.midpoint[2], 1);
+                const clipCoords = vec4.create();
+                vec4.transformMat4(clipCoords, worldCoords, mvpMatrix);
+
+                if (clipCoords[3] < 0) {
+                    label.element.style.display = 'none';
+                    return;
+                }
+
+                const ndcX = clipCoords[0] / clipCoords[3];
+                const ndcY = clipCoords[1] / clipCoords[3];
+                const screenX = (ndcX + 1) * canvas.width / 2;
+                const screenY = (1 - ndcY) * canvas.height / 2;
+
+                label.element.style.display = 'block';
+                label.element.style.transform = `translate(${screenX}px, ${screenY}px)`;
+            });
+
+            animationFrameId = requestAnimationFrame(render);
+        }
+
+        let isDragging = false, lastMouseX = 0, lastMouseY = 0;
+        canvas.addEventListener('mousedown', (e) => { isDragging = true; lastMouseX = e.clientX; lastMouseY = e.clientY; });
+        window.addEventListener('mouseup', () => isDragging = false);
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - lastMouseX; const dy = e.clientY - lastMouseY;
+            cameraAngleX += dx * 0.01; cameraAngleY += dy * 0.01;
+            lastMouseX = e.clientX; lastMouseY = e.clientY;
+        });
+    </script>
+</body>
+</html>
